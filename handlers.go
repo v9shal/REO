@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"strconv"
 )
 
 func handleSet(conn net.Conn, store *MemoryStore, args []string) {
@@ -59,4 +60,30 @@ func handleExists(conn net.Conn, store *MemoryStore, args []string) {
 
 	response := fmt.Sprintf(":%d\r\n", count)
 	conn.Write([]byte(response))
+}
+
+func handleExpire(conn net.Conn, store *MemoryStore, args []string) {
+	if len(args) != 3 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
+		return
+	}
+	key := args[1]
+	time := args[2]
+	seconds, error := strconv.Atoi(time)
+	if error != nil {
+		conn.Write([]byte("-Err while parsing seconds to int\r\n"))
+		return
+	}
+	result := store.Expire(key, seconds)
+	conn.Write([]byte(fmt.Sprintf(":%d\r\n", result)))
+}
+func handleTTL(conn net.Conn, store *MemoryStore, args []string) {
+	if len(args) != 2 {
+		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
+		return
+	}
+	key := args[1]
+	result := store.TTL(key)
+	conn.Write([]byte(fmt.Sprintf(":%d\r\n", result)))
+
 }

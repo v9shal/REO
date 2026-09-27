@@ -91,6 +91,10 @@ func handleConnection(conn net.Conn, store *MemoryStore) {
 			handleDel(conn, store, args)
 		case "EXISTS":
 			handleExists(conn, store, args)
+		case "EXPIRE":
+			handleExpire(conn, store, args)
+		case "TTL":
+			handleTTL(conn, store, args)
 		default:
 			errMsg := fmt.Sprintf("-ERR unknown command '%s'\r\n", args[0])
 			conn.Write([]byte(errMsg))
