@@ -14,6 +14,7 @@ import (
 )
 
 func main() {
+	store := NewMemoryStore()
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatalf("error creating listener: %v\n", err)
@@ -34,11 +35,9 @@ func main() {
 		listener.Close()
 	}()
 
-	// 3. The Accept Loop
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			// If listener was closed by our shutdown goroutine, exit the loop cleanly!
 			if errors.Is(err, net.ErrClosed) {
 				log.Println("Listener closed. Exiting server loop.")
 				break
@@ -47,13 +46,13 @@ func main() {
 			continue
 		}
 
-		go handleConnection(conn)
+		go handleConnection(conn, store)
 	}
 
 	log.Println("Server shut down successfully.")
 }
 
-func handleConnection(conn net.Conn) {
+func handleConnection(conn net.Conn, store *MemoryStore) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
@@ -84,6 +83,14 @@ func handleConnection(conn net.Conn) {
 			} else {
 				conn.Write([]byte("-ERR wrong number of arguments for 'ping' command\r\n"))
 			}
+		case "GET":
+			handleGet(conn, store, args)
+		case "SET":
+			handleSet(conn, store, args)
+		case "DEL":
+			handleDel(conn, store, args)
+		case "EXISTS":
+			handleExists(conn, store, args)
 		default:
 			errMsg := fmt.Sprintf("-ERR unknown command '%s'\r\n", args[0])
 			conn.Write([]byte(errMsg))
