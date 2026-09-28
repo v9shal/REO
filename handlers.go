@@ -6,7 +6,7 @@ import (
 	"strconv"
 )
 
-func handleSet(conn net.Conn, store *MemoryStore, args []string) {
+func handleSet(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 3 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
 		return
@@ -19,7 +19,7 @@ func handleSet(conn net.Conn, store *MemoryStore, args []string) {
 	conn.Write([]byte("+OK\r\n"))
 }
 
-func handleGet(conn net.Conn, store *MemoryStore, args []string) {
+func handleGet(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
 		return
@@ -36,7 +36,7 @@ func handleGet(conn net.Conn, store *MemoryStore, args []string) {
 	conn.Write([]byte(response))
 }
 
-func handleDel(conn net.Conn, store *MemoryStore, args []string) {
+func handleDel(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
 		return
@@ -49,7 +49,7 @@ func handleDel(conn net.Conn, store *MemoryStore, args []string) {
 	conn.Write([]byte(response))
 }
 
-func handleExists(conn net.Conn, store *MemoryStore, args []string) {
+func handleExists(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'exists' command\r\n"))
 		return
@@ -62,7 +62,7 @@ func handleExists(conn net.Conn, store *MemoryStore, args []string) {
 	conn.Write([]byte(response))
 }
 
-func handleExpire(conn net.Conn, store *MemoryStore, args []string) {
+func handleExpire(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 3 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
 		return
@@ -77,7 +77,7 @@ func handleExpire(conn net.Conn, store *MemoryStore, args []string) {
 	result := store.Expire(key, seconds)
 	conn.Write([]byte(fmt.Sprintf(":%d\r\n", result)))
 }
-func handleTTL(conn net.Conn, store *MemoryStore, args []string) {
+func handleTTL(conn net.Conn, store *ShardedStore, args []string) {
 	if len(args) != 2 {
 		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
 		return

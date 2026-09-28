@@ -1,6 +1,7 @@
 package main
 
 import (
+	"hash/fnv"
 	"sync"
 	"time"
 )
@@ -9,16 +10,31 @@ type Item struct {
 	val       string
 	expiresAt *time.Time
 }
-type MemoryStore struct {
+
+type Shard struct {
 	mu  sync.RWMutex
 	mem map[string]Item
 }
+type ShardedStore struct {
+	shards []Shard
+}
 
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		mu:  sync.RWMutex{},
-		mem: make(map[string]Item),
+const NumShards = 32
+
+func NewShardStore() *ShardedStore {
+	shards := make([]Shard, NumShards)
+	for i := range shards {
+		shards[i].mem = make(map[string]Item)
 	}
+	return &ShardedStore{
+		shards: shards,
+	}
+}
+
+func fnvHash(key string) int {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32()) & (NumShards - 1)
 }
 func (item Item) isExpired() bool {
 	if item.expiresAt == nil {
@@ -26,40 +42,46 @@ func (item Item) isExpired() bool {
 	}
 	return time.Now().After(*item.expiresAt)
 }
-func (s *MemoryStore) Set(key string, val string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mem[key] = Item{
+func (s *ShardedStore) Set(key string, val string) {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	shard.mem[key] = Item{
 		val:       val,
 		expiresAt: nil,
 	}
 }
-func (s *MemoryStore) Get(key string) (string, bool) {
-	s.mu.RLock()
-	val, ok := s.mem[key]
+func (s *ShardedStore) Get(key string) (string, bool) {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.RLock()
+	val, ok := shard.mem[key]
 	if !ok {
-		s.mu.RUnlock()
+		shard.mu.RUnlock()
 		return "", false
 	}
 	if !val.isExpired() {
-		s.mu.RUnlock()
+		shard.mu.RUnlock()
 		return val.val, true
 	}
-	s.mu.RUnlock()
+	shard.mu.RUnlock()
 	s.Del(key)
 	return "", false
 }
-func (s *MemoryStore) Del(key string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *ShardedStore) Del(key string) int {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	if _, exists := s.mem[key]; exists {
-		delete(s.mem, key)
+	if _, exists := shard.mem[key]; exists {
+		delete(shard.mem, key)
 		return 1
 	}
 	return 0
 }
-func (s *MemoryStore) Exist(key string) int {
+func (s *ShardedStore) Exist(key string) int {
 	_, err := s.Get(key)
 	if err == true {
 		return 1
@@ -68,46 +90,50 @@ func (s *MemoryStore) Exist(key string) int {
 
 }
 
-func (s *MemoryStore) Expire(key string, seconds int) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *ShardedStore) Expire(key string, seconds int) int {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	item, exists := s.mem[key]
+	item, exists := shard.mem[key]
 	if !exists {
 		return 0
 	}
 
 	if item.isExpired() {
-		delete(s.mem, key)
+		delete(shard.mem, key)
 		return 0
 	}
 
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	item.expiresAt = &deadline
-	s.mem[key] = item
+	shard.mem[key] = item
 	return 1
 }
-func (s *MemoryStore) TTL(key string) int {
-	s.mu.RLock()
-	item, exists := s.mem[key]
+func (s *ShardedStore) TTL(key string) int {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.RLock()
+	item, exists := shard.mem[key]
 
 	if !exists {
-		s.mu.RUnlock()
+		shard.mu.RUnlock()
 		return -2
 	}
 
 	if item.isExpired() {
-		s.mu.RUnlock()
+		shard.mu.RUnlock()
 		s.Del(key)
 		return -2
 	}
 
 	if item.expiresAt == nil {
-		s.mu.RUnlock()
+		shard.mu.RUnlock()
 		return -1
 	}
 
-	s.mu.RUnlock()
+	shard.mu.RUnlock()
 	remaining := int(time.Until(*item.expiresAt).Seconds())
 	return remaining
 }

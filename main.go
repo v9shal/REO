@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	store := NewMemoryStore()
+	store := NewShardStore()
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatalf("error creating listener: %v\n", err)
@@ -52,7 +52,7 @@ func main() {
 	log.Println("Server shut down successfully.")
 }
 
-func handleConnection(conn net.Conn, store *MemoryStore) {
+func handleConnection(conn net.Conn, store *ShardedStore) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
