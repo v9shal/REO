@@ -3,12 +3,11 @@ package main
 import (
 	"bufio"
 	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -19,8 +18,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("error creating listener: %v\n", err)
 	}
-
-	log.Println("Redis server listening on port 8080...")
 
 	// 1. Create a channel to listen for OS signals (buffer size 1 is standard)
 	shutdown := make(chan os.Signal, 1)
@@ -54,51 +51,47 @@ func main() {
 
 func handleConnection(conn net.Conn, store *ShardedStore) {
 	defer conn.Close()
+
 	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn) // 🚀 Buffered output: coalesces TCP packets
 
 	for {
 		args, err := parseRESP(reader)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				log.Printf("Client disconnected cleanly: %s\n", conn.RemoteAddr())
-				return
-			}
-			log.Printf("Parser error from %s: %v\n", conn.RemoteAddr(), err)
-			return
+			return // Disconnect cleanly, no logging on hot path
 		}
-		log.Printf("Parsed command: %v\n", args)
+
 		if len(args) == 0 {
 			continue
 		}
+
 		cmd := strings.ToUpper(args[0])
 
 		switch cmd {
 		case "PING":
 			if len(args) == 1 {
-				conn.Write([]byte("+PONG\r\n"))
-			} else if len(args) == 2 {
-				msg := args[1]
-				response := fmt.Sprintf("$%d\r\n%s\r\n", len(msg), msg)
-				conn.Write([]byte(response))
+				writer.WriteString("+PONG\r\n")
 			} else {
-				conn.Write([]byte("-ERR wrong number of arguments for 'ping' command\r\n"))
+				msg := args[1]
+				writer.WriteString("$" + strconv.Itoa(len(msg)) + "\r\n" + msg + "\r\n")
 			}
-		case "GET":
-			handleGet(conn, store, args)
 		case "SET":
-			handleSet(conn, store, args)
+			handleSet(writer, store, args)
+		case "GET":
+			handleGet(writer, store, args)
 		case "DEL":
-			handleDel(conn, store, args)
+			handleDel(writer, store, args)
 		case "EXISTS":
-			handleExists(conn, store, args)
+			handleExists(writer, store, args)
 		case "EXPIRE":
-			handleExpire(conn, store, args)
+			handleExpire(writer, store, args)
 		case "TTL":
-			handleTTL(conn, store, args)
+			handleTTL(writer, store, args)
 		default:
-			errMsg := fmt.Sprintf("-ERR unknown command '%s'\r\n", args[0])
-			conn.Write([]byte(errMsg))
-
+			writer.WriteString("-ERR unknown command '" + args[0] + "'\r\n")
 		}
+
+		// Flush all buffered bytes in ONE single TCP syscall!
+		writer.Flush()
 	}
 }

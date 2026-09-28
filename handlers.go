@@ -1,89 +1,78 @@
 package main
 
 import (
-	"fmt"
-	"net"
+	"bufio"
 	"strconv"
 )
 
-func handleSet(conn net.Conn, store *ShardedStore, args []string) {
+func handleSet(writer *bufio.Writer, store *ShardedStore, args []string) {
 	if len(args) != 3 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+		writer.WriteString("-ERR wrong number of arguments for 'set' command\r\n")
 		return
 	}
 
-	key := args[1]
-	val := args[2]
-
-	store.Set(key, val)
-	conn.Write([]byte("+OK\r\n"))
+	store.Set(args[1], args[2])
+	writer.WriteString("+OK\r\n")
 }
 
-func handleGet(conn net.Conn, store *ShardedStore, args []string) {
+func handleGet(writer *bufio.Writer, store *ShardedStore, args []string) {
 	if len(args) != 2 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+		writer.WriteString("-ERR wrong number of arguments for 'get' command\r\n")
 		return
 	}
 
-	key := args[1]
-	val, ok := store.Get(key)
+	val, ok := store.Get(args[1])
 	if !ok {
-		conn.Write([]byte("$-1\r\n"))
+		writer.WriteString("$-1\r\n")
 		return
 	}
 
-	response := fmt.Sprintf("$%d\r\n%s\r\n", len(val), val)
-	conn.Write([]byte(response))
+	// Zero reflection: write bulk string directly
+	writer.WriteString("$" + strconv.Itoa(len(val)) + "\r\n" + val + "\r\n")
 }
 
-func handleDel(conn net.Conn, store *ShardedStore, args []string) {
+func handleDel(writer *bufio.Writer, store *ShardedStore, args []string) {
 	if len(args) != 2 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
+		writer.WriteString("-ERR wrong number of arguments for 'del' command\r\n")
 		return
 	}
 
-	key := args[1]
-	count := store.Del(key)
-
-	response := fmt.Sprintf(":%d\r\n", count)
-	conn.Write([]byte(response))
+	count := store.Del(args[1])
+	writer.WriteString(":" + strconv.Itoa(count) + "\r\n")
 }
 
-func handleExists(conn net.Conn, store *ShardedStore, args []string) {
+func handleExists(writer *bufio.Writer, store *ShardedStore, args []string) {
 	if len(args) != 2 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'exists' command\r\n"))
+		writer.WriteString("-ERR wrong number of arguments for 'exists' command\r\n")
 		return
 	}
 
-	key := args[1]
-	count := store.Exist(key)
-
-	response := fmt.Sprintf(":%d\r\n", count)
-	conn.Write([]byte(response))
+	count := store.Exist(args[1])
+	writer.WriteString(":" + strconv.Itoa(count) + "\r\n")
 }
 
-func handleExpire(conn net.Conn, store *ShardedStore, args []string) {
+func handleExpire(writer *bufio.Writer, store *ShardedStore, args []string) {
 	if len(args) != 3 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
+		writer.WriteString("-ERR wrong number of arguments for 'expire' command\r\n")
 		return
 	}
-	key := args[1]
-	time := args[2]
-	seconds, error := strconv.Atoi(time)
-	if error != nil {
-		conn.Write([]byte("-Err while parsing seconds to int\r\n"))
-		return
-	}
-	result := store.Expire(key, seconds)
-	conn.Write([]byte(fmt.Sprintf(":%d\r\n", result)))
-}
-func handleTTL(conn net.Conn, store *ShardedStore, args []string) {
-	if len(args) != 2 {
-		conn.Write([]byte("-ERR wrong number of arguments for 'Expire' command\r\n"))
-		return
-	}
-	key := args[1]
-	result := store.TTL(key)
-	conn.Write([]byte(fmt.Sprintf(":%d\r\n", result)))
 
+	seconds, err := strconv.Atoi(args[2])
+	if err != nil {
+		writer.WriteString("-ERR value is not an integer or out of range\r\n")
+		return
+	}
+
+	result := store.Expire(args[1], seconds)
+	writer.WriteString(":" + strconv.Itoa(result) + "\r\n")
+}
+
+func handleTTL(writer *bufio.Writer, store *ShardedStore, args []string) {
+	if len(args) != 2 {
+		writer.WriteString("-ERR wrong number of arguments for 'ttl' command\r\n")
+		return
+	}
+
+	result := store.TTL(args[1])
+	writer.WriteString(":" + strconv.Itoa(result) + "\r\n")
 }

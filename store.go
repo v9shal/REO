@@ -1,7 +1,6 @@
 package main
 
 import (
-	"hash/fnv"
 	"sync"
 	"time"
 )
@@ -32,9 +31,12 @@ func NewShardStore() *ShardedStore {
 }
 
 func fnvHash(key string) int {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return int(h.Sum32()) & (NumShards - 1)
+	var hash uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= 16777619
+	}
+	return int(hash & (NumShards - 1))
 }
 func (item Item) isExpired() bool {
 	if item.expiresAt == nil {
