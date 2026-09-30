@@ -19,16 +19,13 @@ func main() {
 		log.Fatalf("error creating listener: %v\n", err)
 	}
 
-	// 1. Create a channel to listen for OS signals (buffer size 1 is standard)
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
-	// 2. Spawn a background goroutine waiting specifically for Ctrl+C
 	go func() {
 		sig := <-shutdown
 		log.Printf("\nReceived signal %v. Shutting down server...\n", sig)
 
-		// Closing the listener causes listener.Accept() to unblock immediately!
 		listener.Close()
 	}()
 
@@ -53,12 +50,12 @@ func handleConnection(conn net.Conn, store *ShardedStore) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn) // 🚀 Buffered output: coalesces TCP packets
+	writer := bufio.NewWriter(conn)
 
 	for {
 		args, err := parseRESP(reader)
 		if err != nil {
-			return // Disconnect cleanly, no logging on hot path
+			return
 		}
 
 		if len(args) == 0 {
@@ -87,11 +84,16 @@ func handleConnection(conn net.Conn, store *ShardedStore) {
 			handleExpire(writer, store, args)
 		case "TTL":
 			handleTTL(writer, store, args)
+		case "HISTORY":
+			handleHistory(writer, store, args)
+		case "AS.OF", "ASOF":
+			handleAsOf(writer, store, args)
+		case "ROLLBACK":
+			handleRollback(writer, store, args)
 		default:
 			writer.WriteString("-ERR unknown command '" + args[0] + "'\r\n")
 		}
 
-		// Flush all buffered bytes in ONE single TCP syscall!
 		writer.Flush()
 	}
 }

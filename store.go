@@ -1,21 +1,29 @@
 package main
 
 import (
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-type Item struct {
-	val       string
-	expiresAt *time.Time
+const maxVersion = 5
+
+type Version struct {
+	VersionId   uint64
+	Timestamp   int64
+	value       string
+	isTombStone bool
+	expiresAt   int64
 }
 
 type Shard struct {
 	mu  sync.RWMutex
-	mem map[string]Item
+	mem map[string][]Version
 }
 type ShardedStore struct {
-	shards []Shard
+	shards          []Shard
+	globalVersionID atomic.Uint64
 }
 
 const NumShards = 32
@@ -23,7 +31,7 @@ const NumShards = 32
 func NewShardStore() *ShardedStore {
 	shards := make([]Shard, NumShards)
 	for i := range shards {
-		shards[i].mem = make(map[string]Item)
+		shards[i].mem = make(map[string][]Version)
 	}
 	return &ShardedStore{
 		shards: shards,
@@ -38,38 +46,65 @@ func fnvHash(key string) int {
 	}
 	return int(hash & (NumShards - 1))
 }
-func (item Item) isExpired() bool {
-	if item.expiresAt == nil {
+
+func (v Version) isExpiredAt(targetTimeNano int64) bool {
+	if v.expiresAt == 0 {
 		return false
 	}
-	return time.Now().After(*item.expiresAt)
+	return targetTimeNano >= v.expiresAt
 }
-func (s *ShardedStore) Set(key string, val string) {
+func addVersion(versions []Version, v Version) []Version {
+	if len(versions) == maxVersion {
+		copy(versions, versions[1:])
+		versions[len(versions)-1] = v
+		return versions
+	}
+
+	return append(versions, v)
+}
+func (s *ShardedStore) Set(key string, val string) uint64 {
 	index := fnvHash(key)
 	shard := &s.shards[index]
+	vID := s.globalVersionID.Add(1)
+	Version := Version{
+		VersionId:   vID,
+		Timestamp:   time.Now().UnixNano(),
+		value:       val,
+		expiresAt:   0,
+		isTombStone: false,
+	}
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	shard.mem[key] = Item{
-		val:       val,
-		expiresAt: nil,
-	}
+	shard.mem[key] = addVersion(shard.mem[key], Version)
+	return vID
+
 }
 func (s *ShardedStore) Get(key string) (string, bool) {
 	index := fnvHash(key)
 	shard := &s.shards[index]
 	shard.mu.RLock()
-	val, ok := shard.mem[key]
+	versions, ok := shard.mem[key]
+
 	if !ok {
 		shard.mu.RUnlock()
 		return "", false
 	}
-	if !val.isExpired() {
+	if len(versions) == 0 {
 		shard.mu.RUnlock()
-		return val.val, true
+		return "", false
 	}
+	latest_version := versions[len(versions)-1]
+	if latest_version.isTombStone {
+		shard.mu.RUnlock()
+		return "", false
+	}
+	if latest_version.isExpiredAt(time.Now().UnixNano()) {
+		shard.mu.RUnlock()
+		return "", false
+	}
+
 	shard.mu.RUnlock()
-	s.Del(key)
-	return "", false
+	return latest_version.value, true
 }
 func (s *ShardedStore) Del(key string) int {
 	index := fnvHash(key)
@@ -77,11 +112,95 @@ func (s *ShardedStore) Del(key string) int {
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
-	if _, exists := shard.mem[key]; exists {
-		delete(shard.mem, key)
-		return 1
+	version, exists := shard.mem[key]
+	if !exists || len(version) == 0 {
+		return 0
 	}
-	return 0
+
+	latest_version := version[len(version)-1]
+	now := time.Now().UnixNano()
+
+	if latest_version.isTombStone || latest_version.isExpiredAt(now) {
+		return 0
+	}
+
+	vID := s.globalVersionID.Add(1)
+	tombstone := Version{
+		VersionId:   vID,
+		Timestamp:   now,
+		value:       "",
+		isTombStone: true,
+		expiresAt:   0,
+	}
+
+	shard.mem[key] = addVersion(shard.mem[key], tombstone)
+	return 1
+}
+func (s *ShardedStore) History(key string) []Version {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	version := shard.mem[key]
+	return version
+}
+func (s *ShardedStore) AsOf(key string, targetTimeNano int64) (string, bool) {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	versions, ok := shard.mem[key]
+	if !ok || len(versions) == 0 {
+		return "", false
+	}
+	if targetTimeNano < versions[0].Timestamp {
+		return "", false
+	}
+	idx := sort.Search(len(versions), func(i int) bool {
+		return versions[i].Timestamp > targetTimeNano
+	})
+	if idx == len(versions) {
+		idx = len(versions) - 1
+	} else {
+		idx--
+	}
+	version := versions[idx]
+	if version.isTombStone {
+		return "", false
+	}
+	if version.isExpiredAt(targetTimeNano) {
+		return "", false
+	}
+	return version.value, true
+
+}
+
+func (s *ShardedStore) Rollback(key string, targetVersionId uint64) (string, bool) {
+	index := fnvHash(key)
+	shard := &s.shards[index]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	version := shard.mem[key]
+	for _, v := range version {
+		if v.VersionId == targetVersionId {
+			if v.isTombStone {
+				return "", false
+			}
+			value := v.value
+			vID := s.globalVersionID.Add(1)
+			ver := Version{
+				VersionId:   vID,
+				Timestamp:   time.Now().UnixNano(),
+				isTombStone: false,
+				value:       value,
+				expiresAt:   0,
+			}
+			shard.mem[key] = addVersion(shard.mem[key], ver)
+			return value, true
+		}
+	}
+	return "", false
+
 }
 func (s *ShardedStore) Exist(key string) int {
 	_, err := s.Get(key)
@@ -97,45 +216,47 @@ func (s *ShardedStore) Expire(key string, seconds int) int {
 	shard := &s.shards[index]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-
-	item, exists := shard.mem[key]
-	if !exists {
+	version, exists := shard.mem[key]
+	if !exists || len(version) == 0 {
 		return 0
 	}
-
-	if item.isExpired() {
-		delete(shard.mem, key)
+	v := version[len(version)-1]
+	if v.isTombStone || v.isExpiredAt(time.Now().UnixNano()) {
 		return 0
 	}
-
-	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
-	item.expiresAt = &deadline
-	shard.mem[key] = item
+	version[len(version)-1].expiresAt = time.Now().Add(time.Duration(seconds) * time.Second).UnixNano()
 	return 1
 }
 func (s *ShardedStore) TTL(key string) int {
 	index := fnvHash(key)
 	shard := &s.shards[index]
 	shard.mu.RLock()
-	item, exists := shard.mem[key]
-
+	version, exists := shard.mem[key]
+	if !exists || len(version) == 0 {
+		shard.mu.RUnlock()
+		return -2
+	}
+	v := version[len(version)-1]
 	if !exists {
 		shard.mu.RUnlock()
 		return -2
 	}
 
-	if item.isExpired() {
+	if v.isExpiredAt(time.Now().UnixNano()) {
 		shard.mu.RUnlock()
-		s.Del(key)
 		return -2
 	}
 
-	if item.expiresAt == nil {
+	if v.expiresAt == 0 {
 		shard.mu.RUnlock()
 		return -1
 	}
 
 	shard.mu.RUnlock()
-	remaining := int(time.Until(*item.expiresAt).Seconds())
+	now := time.Now().UnixNano()
+	if v.expiresAt <= now {
+		return -2
+	}
+	remaining := int((v.expiresAt - now) / int64(time.Second))
 	return remaining
 }
