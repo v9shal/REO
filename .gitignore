@@ -1,0 +1,32 @@
+# Binaries / build artifacts
+/reo
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go build cache / temp files
+/bin/
+/pkg/
+/coverage.out
+*.out
+
+# Editor / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and generated reports
+*.log
+*.tmp
+reo_report.txt
+
+data/
+
+# Local environment files
+.env
+.env.*

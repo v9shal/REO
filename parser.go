@@ -9,6 +9,11 @@ import (
 	"strings"
 )
 
+const (
+	maxArgs    = 1024
+	maxBulkLen = 64 << 20 // 64 MiB
+)
+
 func parseRESP(reader *bufio.Reader) ([]string, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -19,9 +24,14 @@ func parseRESP(reader *bufio.Reader) ([]string, error) {
 	if len(line) == 0 || line[0] != '*' {
 		return nil, errors.New("expected '*' at start of command")
 	}
+
 	arrayCount, err := strconv.Atoi(line[1:])
+
 	if err != nil {
 		return nil, fmt.Errorf("invalid array length: %v", err)
+	}
+	if arrayCount < 0 || arrayCount > maxArgs {
+		return nil, fmt.Errorf("invalid array length: %d", arrayCount)
 	}
 
 	var args []string
@@ -41,6 +51,9 @@ func parseRESP(reader *bufio.Reader) ([]string, error) {
 		strLen, err := strconv.Atoi(lenLine[1:])
 		if err != nil {
 			return nil, fmt.Errorf("invalid bulk string length: %v", err)
+		}
+		if strLen < 0 || strLen > maxBulkLen {
+			return nil, fmt.Errorf("invalid bulk string length: %d", strLen)
 		}
 
 		// Read exactly that many bytes from the stream (e.g. "PING")

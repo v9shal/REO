@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"sync"
 )
@@ -42,7 +41,6 @@ func (d *DiskEngine) Write(payload []byte) (DiskStub, error) {
 	startOffset := d.offset
 	_, err := d.file.Write(payload)
 	if err != nil {
-		log.Println("error while writing to the file %s", err)
 		return DiskStub{}, err
 
 	}
@@ -58,7 +56,6 @@ func (d *DiskEngine) Read(stub DiskStub) ([]byte, error) {
 	buf := make([]byte, stub.Length)
 	_, err := d.file.ReadAt(buf, stub.Offset)
 	if err != nil {
-		log.Print("Error while reading from disk, %s", err)
 		return buf, err
 	}
 	return buf, nil
@@ -66,7 +63,6 @@ func (d *DiskEngine) Read(stub DiskStub) ([]byte, error) {
 func serializeVersions(versions []Version) ([]byte, error) {
 	res, err := json.Marshal(versions)
 	if err != nil {
-		log.Print("erro while marshaling,%s", err)
 		return nil, err
 
 	}

@@ -1,10 +1,11 @@
 package main
 
 import (
-	"math/rand"
-
 	"math"
+	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,16 @@ const (
 	maxVersion = 5
 	NumShards  = 32
 )
+
+// maxKeysInRam is the soft cap on keys held in RAM; colder keys spill to disk.
+// Override with the REO_MAX_RAM_KEYS environment variable (default 5, which
+// forces almost everything through the disk tier).
+var maxKeysInRam = func() int64 {
+	if v, err := strconv.ParseInt(os.Getenv("REO_MAX_RAM_KEYS"), 10, 64); err == nil && v > 0 {
+		return v
+	}
+	return 5
+}()
 
 type StorageLocation uint8
 
@@ -40,6 +51,10 @@ type Version struct {
 type Shard struct {
 	mu  sync.RWMutex
 	mem map[string]*KeyEntry
+	// ram is the set of keys in mem whose Location is LocationRam. It stays
+	// small (bounded by the RAM cap), so picking an eviction victim never has
+	// to walk the (huge) population of disk-resident keys.
+	ram map[string]struct{}
 }
 
 type ShardedStore struct {
@@ -63,6 +78,7 @@ func NewShardStore(filePath string) (*ShardedStore, error) {
 
 	for i := range shards {
 		shards[i].mem = make(map[string]*KeyEntry)
+		shards[i].ram = make(map[string]struct{})
 	}
 
 	return &ShardedStore{
@@ -157,6 +173,7 @@ func (s *ShardedStore) hydrate(
 	// Put data back into RAM.
 	entry.Versions = versions
 	entry.Location = LocationRam
+	shard.ram[key] = struct{}{}
 	s.ramKeys.Add(1)
 
 	return versions, true, nil
@@ -181,51 +198,48 @@ func (s *ShardedStore) loadFromDisk(
 // --------------------------------------------------
 
 func (s *ShardedStore) Set(key string, val string) uint64 {
-	index := fnvHash(key)
-	shard := &s.shards[index]
-	const MaxKeysInRam = 5
-	shard.mu.Lock()
+	// The locked section lives in its own closure so `defer` guarantees the
+	// shard lock is released on EVERY return path (including errors).
+	vID := func() uint64 {
+		shard := &s.shards[fnvHash(key)]
+		shard.mu.Lock()
+		defer shard.mu.Unlock()
 
-	entry, exists := shard.mem[key]
+		entry, exists := shard.mem[key]
+		if !exists {
+			entry = &KeyEntry{
+				Location: LocationRam,
+				Versions: make([]Version, 0, maxVersion),
+			}
+			shard.mem[key] = entry
+			shard.ram[key] = struct{}{}
+			s.ramKeys.Add(1)
+		}
+		entry.LastAccessed = time.Now().UnixNano()
 
-	// Key doesn't exist.
-	if !exists {
-		entry = &KeyEntry{
-			Location: LocationRam,
-			Versions: make([]Version, 0, maxVersion),
+		// If key is on disk, hydrate it first.
+		if entry.Location == LocationDisk {
+			versions, err := s.loadFromDisk(entry)
+			if err != nil {
+				return 0
+			}
+			entry.Versions = versions
+			entry.Location = LocationRam
+			shard.ram[key] = struct{}{}
+			s.ramKeys.Add(1)
 		}
 
-		shard.mem[key] = entry
-		s.ramKeys.Add(1)
-	}
-	entry.LastAccessed = time.Now().UnixNano()
+		id := s.globalVersionID.Add(1)
+		entry.Versions = addVersion(entry.Versions, Version{
+			VersionId: id,
+			Timestamp: time.Now().UnixNano(),
+			Value:     val,
+		})
+		return id
+	}()
 
-	// If key is on disk, hydrate it first.
-	if entry.Location == LocationDisk {
-		versions, err := s.loadFromDisk(entry)
-
-		if err != nil {
-			return 0
-		}
-
-		entry.Versions = versions
-		entry.Location = LocationRam
-	}
-
-	// Generate new version ID.
-	vID := s.globalVersionID.Add(1)
-
-	version := Version{
-		VersionId:   vID,
-		Timestamp:   time.Now().UnixNano(),
-		Value:       val,
-		IsTombStone: false,
-		ExpiresAt:   0,
-	}
-
-	entry.Versions = addVersion(entry.Versions, version)
-	shard.mu.Unlock()
-	if s.ramKeys.Load() > MaxKeysInRam {
+	// Evict AFTER releasing the lock (evictOneColdKey takes another shard's lock).
+	if vID != 0 && s.ramKeys.Load() > maxKeysInRam {
 		s.evictOneColdKey()
 	}
 	return vID
@@ -313,7 +327,6 @@ func (s *ShardedStore) Del(key string) int {
 		entry.Versions,
 		tombstone,
 	)
-	s.ramKeys.Add(1)
 
 	return 1
 }
@@ -619,29 +632,52 @@ func (s *ShardedStore) evict(
 	// Save disk location.
 	entry.Stub = stub
 	entry.Location = LocationDisk
+	delete(shard.ram, key)
 
 	return nil
 }
 
+// evictOneColdKey moves one cold RAM-resident key to disk.
+//
+// It starts at a random shard and walks forward until a shard that actually
+// has RAM-resident keys is found (picking a single random shard often hit an
+// empty one, which let the RAM cap leak). Inside the shard it samples a few
+// keys from the small RAM set and evicts the least recently used of them, so
+// the cost per call is O(1) no matter how many keys live on disk.
 func (s *ShardedStore) evictOneColdKey() {
-	shardInd := rand.Intn(NumShards)
-	shard := &s.shards[shardInd]
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-	var oldestTime int64 = math.MaxInt64
-
-	var keyToEvict string
-	for key, entry := range shard.mem {
-
-		if entry.Location == LocationRam {
-			if entry.LastAccessed < oldestTime {
-				oldestTime = entry.LastAccessed
-				keyToEvict = key
-			}
+	start := rand.Intn(NumShards)
+	for i := 0; i < NumShards; i++ {
+		if s.evictColdFromShard(&s.shards[(start+i)%NumShards]) {
+			return
 		}
 	}
-	if keyToEvict != "" {
-		s.evict(shard, keyToEvict)
+}
+
+func (s *ShardedStore) evictColdFromShard(shard *Shard) bool {
+	const sampleSize = 8
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if len(shard.ram) == 0 {
+		return false
 	}
 
+	// Go randomizes map iteration order, so the first few entries are a
+	// random sample.
+	var victim string
+	oldest := int64(math.MaxInt64)
+	seen := 0
+	for key := range shard.ram {
+		if e := shard.mem[key]; e != nil && e.LastAccessed < oldest {
+			oldest, victim = e.LastAccessed, key
+		}
+		if seen++; seen >= sampleSize {
+			break
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	return s.evict(shard, victim) == nil
 }
