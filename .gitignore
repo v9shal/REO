@@ -30,3 +30,7 @@ data/
 # Local environment files
 .env
 .env.*
+reo
+data.log
+reo_report.txt
+*.test
