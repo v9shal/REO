@@ -1,5 +1,7 @@
 # REO
 
+[![CI](https://github.com/v9shal/REO/actions/workflows/ci.yml/badge.svg?branch=feat%2Ftcp)](https://github.com/v9shal/REO/actions/workflows/ci.yml)
+
 **A Redis-protocol key-value server written in Go, with tiered RAM → disk storage, per-key version history, point-in-time reads and rollback.**
 
 REO speaks the Redis wire protocol (RESP) over TCP, so `redis-cli` and ordinary Redis client libraries can talk to it. Under the hood it is a 32-shard in-memory store that spills cold keys to an append-only log on disk, keeps the last 5 versions of every key, and lets you ask *"what was this key at time T?"* or *"put it back the way it was"*.
