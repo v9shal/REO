@@ -97,17 +97,31 @@ func handleHistory(writer *bufio.Writer, store *ShardedStore, args []string) {
 	// 2. Write each version as a formatted Bulk String
 	for _, v := range history {
 		var entry string
-		if v.isTombStone {
+		if v.IsTombStone {
 			entry = "v" + strconv.FormatUint(v.VersionId, 10) + " | " + strconv.FormatInt(v.Timestamp, 10) + " | [DELETED]"
 		} else {
-			entry = "v" + strconv.FormatUint(v.VersionId, 10) + " | " + strconv.FormatInt(v.Timestamp, 10) + " | " + v.value
+			entry = "v" + strconv.FormatUint(v.VersionId, 10) + " | " + strconv.FormatInt(v.Timestamp, 10) + " | " + v.Value
 		}
 
 		// Write Bulk String for this entry
 		writer.WriteString("$" + strconv.Itoa(len(entry)) + "\r\n" + entry + "\r\n")
 	}
 }
+func handleEvict(writer *bufio.Writer, store *ShardedStore, args []string) {
+	if len(args) != 2 {
+		writer.WriteString("-ERR wrong number of arguments for 'evict' command\r\n")
+		return
+	}
 
+	key := args[1]
+	err := store.Evict(key)
+	if err != nil {
+		writer.WriteString("-ERR eviction failed: " + err.Error() + "\r\n")
+		return
+	}
+
+	writer.WriteString("+OK\r\n")
+}
 func handleAsOf(writer *bufio.Writer, store *ShardedStore, args []string) {
 	// Syntax: AS.OF <key> <timestamp_nano>
 	if len(args) != 3 {

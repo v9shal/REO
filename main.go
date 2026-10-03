@@ -13,7 +13,11 @@ import (
 )
 
 func main() {
-	store := NewShardStore()
+	store, err := NewShardStore("data.log")
+	if err != nil {
+		log.Fatalf("failed to initialize tiered storage: %v\n", err)
+
+	}
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		log.Fatalf("error creating listener: %v\n", err)
@@ -90,6 +94,8 @@ func handleConnection(conn net.Conn, store *ShardedStore) {
 			handleAsOf(writer, store, args)
 		case "ROLLBACK":
 			handleRollback(writer, store, args)
+		case "EVICT":
+			handleEvict(writer, store, args)
 		default:
 			writer.WriteString("-ERR unknown command '" + args[0] + "'\r\n")
 		}
