@@ -1,6 +1,9 @@
 package main
 
 import (
+	"math/rand"
+
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -20,9 +23,10 @@ const (
 )
 
 type KeyEntry struct {
-	Location StorageLocation
-	Versions []Version
-	Stub     DiskStub
+	Location     StorageLocation
+	Versions     []Version
+	Stub         DiskStub
+	LastAccessed int64
 }
 
 type Version struct {
@@ -42,6 +46,7 @@ type ShardedStore struct {
 	shards          []Shard
 	globalVersionID atomic.Uint64
 	disk            *DiskEngine
+	ramKeys         atomic.Int64
 }
 
 // --------------------------------------------------
@@ -131,6 +136,7 @@ func (s *ShardedStore) hydrate(
 	if !exists {
 		return nil, false, nil
 	}
+	entry.LastAccessed = time.Now().UnixNano()
 
 	// Already in RAM.
 	if entry.Location == LocationRam {
@@ -151,6 +157,7 @@ func (s *ShardedStore) hydrate(
 	// Put data back into RAM.
 	entry.Versions = versions
 	entry.Location = LocationRam
+	s.ramKeys.Add(1)
 
 	return versions, true, nil
 }
@@ -176,9 +183,8 @@ func (s *ShardedStore) loadFromDisk(
 func (s *ShardedStore) Set(key string, val string) uint64 {
 	index := fnvHash(key)
 	shard := &s.shards[index]
-
+	const MaxKeysInRam = 5
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 
 	entry, exists := shard.mem[key]
 
@@ -190,7 +196,9 @@ func (s *ShardedStore) Set(key string, val string) uint64 {
 		}
 
 		shard.mem[key] = entry
+		s.ramKeys.Add(1)
 	}
+	entry.LastAccessed = time.Now().UnixNano()
 
 	// If key is on disk, hydrate it first.
 	if entry.Location == LocationDisk {
@@ -216,7 +224,10 @@ func (s *ShardedStore) Set(key string, val string) uint64 {
 	}
 
 	entry.Versions = addVersion(entry.Versions, version)
-
+	shard.mu.Unlock()
+	if s.ramKeys.Load() > MaxKeysInRam {
+		s.evictOneColdKey()
+	}
 	return vID
 }
 
@@ -302,6 +313,7 @@ func (s *ShardedStore) Del(key string) int {
 		entry.Versions,
 		tombstone,
 	)
+	s.ramKeys.Add(1)
 
 	return 1
 }
@@ -600,7 +612,7 @@ func (s *ShardedStore) evict(
 	if err != nil {
 		return err
 	}
-
+	s.ramKeys.Add(-1)
 	// Free versions from RAM.
 	entry.Versions = nil
 
@@ -609,4 +621,27 @@ func (s *ShardedStore) evict(
 	entry.Location = LocationDisk
 
 	return nil
+}
+
+func (s *ShardedStore) evictOneColdKey() {
+	shardInd := rand.Intn(NumShards)
+	shard := &s.shards[shardInd]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	var oldestTime int64 = math.MaxInt64
+
+	var keyToEvict string
+	for key, entry := range shard.mem {
+
+		if entry.Location == LocationRam {
+			if entry.LastAccessed < oldestTime {
+				oldestTime = entry.LastAccessed
+				keyToEvict = key
+			}
+		}
+	}
+	if keyToEvict != "" {
+		s.evict(shard, keyToEvict)
+	}
+
 }
